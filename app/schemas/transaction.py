@@ -41,7 +41,9 @@ class TransactionCreate(BaseModel):
         return value
 
 
-class TransactionResponse(BaseModel):
+class TransactionRecord(BaseModel):
+    """A stored ledger entry, as returned by the API."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -51,4 +53,21 @@ class TransactionResponse(BaseModel):
     description: str | None
     reference_id: str
     created_at: datetime
+
+
+class TransactionResponse(TransactionRecord):
+    """Response to a credit or debit: the new entry plus the balance it produced."""
+
     balance_after: RupeeAmount
+
+
+class PaginationMeta(BaseModel):
+    current_page: int
+    page_size: int
+    total_records: int
+    total_pages: int
+
+
+class TransactionHistoryResponse(BaseModel):
+    data: list[TransactionRecord]
+    pagination: PaginationMeta
