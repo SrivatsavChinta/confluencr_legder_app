@@ -15,6 +15,9 @@ NAMING_CONVENTION = {
 }
 
 PAISE_PER_RUPEE = 100
+SQLITE_MAX_INTEGER = 2**63 - 1
+# Largest rupee amount that fits in a SQLite INTEGER column as paise: 92233720368547758.07.
+MAX_MONEY_AMOUNT = Decimal(SQLITE_MAX_INTEGER) / PAISE_PER_RUPEE
 
 
 class Base(DeclarativeBase):
@@ -35,7 +38,7 @@ class Money(TypeDecorator):
     """Rupee amounts as Decimal in Python, stored exactly as integer paise in the database.
 
     SQLite has no exact decimal type, so integer storage avoids floating-point rounding.
-    Amounts with more than two decimal places are rejected rather than rounded.
+    Amounts with more than two decimal places, or outside the SQLite integer range, are rejected.
     """
 
     impl = Integer
@@ -50,6 +53,8 @@ class Money(TypeDecorator):
         amount = Decimal(value)
         if not amount.is_finite():
             raise ValueError(f"Money value must be finite, got {amount}")
+        if abs(amount) > MAX_MONEY_AMOUNT:
+            raise ValueError(f"Money value is outside the storable range: {amount}")
 
         paise = amount * PAISE_PER_RUPEE
         if paise != paise.to_integral_value():

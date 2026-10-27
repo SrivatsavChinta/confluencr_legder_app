@@ -2,38 +2,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 
-from app.core.database import DEFAULT_DATABASE_PATH, create_db_engine, create_session_factory, get_db, init_db
-from app.main import app
+from app.core.database import create_db_engine, create_session_factory
 from app.models import Account
-
-
-@pytest.fixture
-def session_factory(tmp_path):
-    database_path = tmp_path / "test_api.db"
-    assert database_path != DEFAULT_DATABASE_PATH
-
-    engine = create_db_engine(f"sqlite:///{database_path}")
-    init_db(engine)
-    yield create_session_factory(engine)
-    engine.dispose()
-
-
-def use_database(session_factory):
-    def get_test_db():
-        with session_factory() as session:
-            yield session
-
-    app.dependency_overrides[get_db] = get_test_db
-
-
-@pytest.fixture
-def client(session_factory):
-    use_database(session_factory)
-    # Not used as a context manager: that would run app startup, which initialises the default database.
-    yield TestClient(app)
-    app.dependency_overrides.pop(get_db, None)
 
 
 def create_account(client, name="Savings Account"):
@@ -234,7 +205,7 @@ def test_balance_of_missing_account_returns_404(client):
 # Unexpected failures
 
 
-def test_database_failure_returns_safe_500(client, tmp_path):
+def test_database_failure_returns_safe_500(client, use_database, tmp_path):
     # A database with no tables makes every account query fail inside SQLAlchemy.
     broken_engine = create_db_engine(f"sqlite:///{tmp_path / 'no_tables.db'}")
     use_database(create_session_factory(broken_engine))

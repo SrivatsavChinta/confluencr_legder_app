@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError, StatementError
 
 from app.core.database import DEFAULT_DATABASE_PATH, create_db_engine, create_session_factory, init_db
 from app.models import Account, Transaction, TransactionType, Transfer
+from app.models.base import MAX_MONEY_AMOUNT
 
 EXPECTED_TABLES = {"accounts", "transactions", "transfers"}
 
@@ -143,6 +144,24 @@ def test_money_rejects_sub_paise_and_float_values(session, bad_amount, expected_
     with pytest.raises(StatementError) as error_info:
         session.commit()
     assert isinstance(error_info.value.orig, expected_error)
+    session.rollback()
+
+
+def test_money_accepts_largest_storable_value(session_factory):
+    with session_factory() as session:
+        account_id = create_account(session).id
+        session.get(Account, account_id).balance = MAX_MONEY_AMOUNT
+        session.commit()
+
+    with session_factory() as session:
+        assert session.get(Account, account_id).balance == Decimal("92233720368547758.07")
+
+
+def test_money_rejects_values_outside_sqlite_integer_range(session):
+    session.add(Account(name="Too large", balance=MAX_MONEY_AMOUNT + Decimal("0.01")))
+    with pytest.raises(StatementError) as error_info:
+        session.commit()
+    assert isinstance(error_info.value.orig, ValueError)
     session.rollback()
 
 
