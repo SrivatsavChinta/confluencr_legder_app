@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, WithJsonSchema
 
 from app.models import TransactionType
 from app.models.base import MAX_MONEY_AMOUNT
@@ -36,6 +36,17 @@ PositiveAmount = Annotated[
     Decimal,
     BeforeValidator(require_decimal_string),
     Field(gt=0, le=MAX_MONEY_AMOUNT, decimal_places=2),
+    # The default schema advertises JSON numbers too, which require_decimal_string rejects.
+    WithJsonSchema(
+        {
+            "type": "string",
+            "description": (
+                "Rupee amount as a decimal string: greater than 0, at most two decimal places, "
+                f"at most {MAX_MONEY_AMOUNT}. JSON numbers are rejected."
+            ),
+            "examples": ["500.00"],
+        }
+    ),
 ]
 
 

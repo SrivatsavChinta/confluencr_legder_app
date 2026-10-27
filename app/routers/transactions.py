@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.models import Account, Transaction, TransactionType
 from app.models.base import MAX_MONEY_AMOUNT, SQLITE_MAX_INTEGER
-from app.routers.accounts import AccountId, DbSession, get_account_or_404
+from app.routers.accounts import ACCOUNT_NOT_FOUND_RESPONSE, AccountId, DbSession, get_account_or_404
+from app.schemas.error import ErrorResponse
 from app.schemas.transaction import TransactionCreate, TransactionHistoryResponse, TransactionResponse
 
 router = APIRouter(prefix="/api/accounts", tags=["transactions"])
@@ -58,6 +59,14 @@ def reference_exists(db: Session, account_id: int, reference_id: str) -> bool:
     "/{account_id}/transactions",
     response_model=TransactionResponse,
     status_code=status.HTTP_201_CREATED,
+    responses={
+        **ACCOUNT_NOT_FOUND_RESPONSE,
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "Duplicate reference_id on this account, insufficient balance, "
+            "or the resulting balance would exceed the maximum",
+        },
+    },
 )
 def create_transaction(account_id: AccountId, payload: TransactionCreate, db: DbSession) -> TransactionResponse:
     get_account_or_404(db, account_id)
@@ -96,7 +105,11 @@ def create_transaction(account_id: AccountId, payload: TransactionCreate, db: Db
     )
 
 
-@router.get("/{account_id}/transactions", response_model=TransactionHistoryResponse)
+@router.get(
+    "/{account_id}/transactions",
+    response_model=TransactionHistoryResponse,
+    responses=ACCOUNT_NOT_FOUND_RESPONSE,
+)
 def list_transactions(
     account_id: AccountId,
     db: DbSession,

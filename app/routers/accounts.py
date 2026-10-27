@@ -12,8 +12,13 @@ from app.schemas.account import (
     AccountListResponse,
     AccountResponse,
 )
+from app.schemas.error import ErrorResponse
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
+
+ACCOUNT_NOT_FOUND_RESPONSE = {
+    status.HTTP_404_NOT_FOUND: {"model": ErrorResponse, "description": "Account not found"},
+}
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -43,12 +48,16 @@ def list_accounts(db: DbSession) -> dict:
     return {"items": accounts}
 
 
-@router.get("/{account_id}", response_model=AccountResponse)
+@router.get("/{account_id}", response_model=AccountResponse, responses=ACCOUNT_NOT_FOUND_RESPONSE)
 def get_account(account_id: AccountId, db: DbSession) -> Account:
     return get_account_or_404(db, account_id)
 
 
-@router.get("/{account_id}/balance", response_model=AccountBalanceResponse)
+@router.get(
+    "/{account_id}/balance",
+    response_model=AccountBalanceResponse,
+    responses=ACCOUNT_NOT_FOUND_RESPONSE,
+)
 def get_account_balance(account_id: AccountId, db: DbSession) -> AccountBalanceResponse:
     account = get_account_or_404(db, account_id)
     return AccountBalanceResponse(account_id=account.id, balance=account.balance)
