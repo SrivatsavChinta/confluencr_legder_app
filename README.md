@@ -11,8 +11,9 @@ The Transaction Ledger API is a backend service for recording financial accounts
 - Phase 3: Account management API: create, list, and retrieve accounts, and read an account's balance.
 - Phase 4: Credit and debit transactions that update the account balance atomically.
 - Phase 5: Transaction history with type filtering, pagination, and newest-first ordering.
+- Phase 6: Atomic money transfers between accounts, recorded as a linked debit and credit.
 
-**Planned for later phases (not yet available):** transfer execution. The `transfers` table exists, but no API writes to it yet.
+All planned API functionality is implemented.
 
 ## Technology Stack
 
@@ -63,7 +64,7 @@ pytest
 
 Database tests create a fresh SQLite file in a pytest temporary directory for each test. They never read or modify `data/ledger.db`.
 
-API tests (`tests/test_accounts.py`, `tests/test_transactions.py`, `tests/test_transaction_history.py`, sharing fixtures in `tests/conftest.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
+API tests (`tests/test_accounts.py`, `tests/test_transactions.py`, `tests/test_transaction_history.py`, `tests/test_transfers.py`, sharing fixtures in `tests/conftest.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
 
 ## API Documentation
 
@@ -300,6 +301,93 @@ Errors:
 
 This endpoint only reads data. It never changes balances or transactions.
 
+## Transfer API
+
+### `POST /api/transfers`: move money between two accounts
+
+Request:
+
+```json
+{
+  "source_account_id": 1,
+  "destination_account_id": 2,
+  "amount": "2000.00",
+  "reference_id": "TRANSFER-001",
+  "description": "Payment"
+}
+```
+
+Response `201 Created` (account 1 had ₹5,000.00, account 2 had ₹1,000.00):
+
+```json
+{
+  "id": 1,
+  "source_account_id": 1,
+  "destination_account_id": 2,
+  "amount": "2000.00",
+  "reference_id": "TRANSFER-001",
+  "description": "Payment",
+  "created_at": "2026-10-27T12:00:00.123456Z",
+  "debit_transaction": {
+    "id": 3, "account_id": 1, "type": "debit", "amount": "2000.00",
+    "description": "Payment", "reference_id": "TRANSFER-001", "created_at": "2026-10-27T12:00:00.123456Z"
+  },
+  "credit_transaction": {
+    "id": 4, "account_id": 2, "type": "credit", "amount": "2000.00",
+    "description": "Payment", "reference_id": "TRANSFER-001", "created_at": "2026-10-27T12:00:00.123456Z"
+  },
+  "source_balance_after": "3000.00"
+}
+```
+
+Afterwards, both accounts hold ₹3,000.00. Only the source's resulting balance is returned; the destination's balance belongs to the receiving account and is available from its own balance endpoint.
+
+Validation rules (`422` if broken):
+
+- `source_account_id` and `destination_account_id` must be JSON integers (not strings or booleans) of at least 1, and must be different.
+- `amount`, `reference_id`, and `description` follow exactly the same rules as for credits and debits: amount as a decimal string, positive, at most two decimal places, finite, within the storable maximum; `reference_id` required, trimmed, not blank, at most 100 characters; optional `description` trimmed, at most 255 characters.
+- No other fields are accepted.
+
+Errors:
+
+| Status | When | Body |
+| ------ | ---- | ---- |
+| `404` | Source account does not exist | `{"detail": "Source account not found"}` |
+| `404` | Destination account does not exist | `{"detail": "Destination account not found"}` |
+| `409` | `reference_id` is already used on the source or destination account | `{"detail": "reference_id has already been used on the source or destination account"}` |
+| `409` | Source balance is less than the amount | `{"detail": "Insufficient balance"}` |
+| `409` | The credit would push the destination past the storable maximum | `{"detail": "Destination balance would exceed the maximum supported amount"}` |
+| `422` | Invalid body, including source = destination | FastAPI validation error list |
+| `500` | Unexpected server failure | `{"detail": "Internal server error"}` |
+
+### Ledger records
+
+A successful transfer creates three rows, all with the same timestamp:
+
+- one `transfers` row (source, destination, amount),
+- one `debit` transaction on the source account,
+- one `credit` transaction on the destination account.
+
+Both transactions carry the transfer's `reference_id` and `description` and link to the transfer through `transfer_id`. They appear in each account's normal transaction history, and the `type` filter and pagination treat them like any other entry.
+
+### Reference uniqueness
+
+The `transfers` table has no reference column. Uniqueness is enforced by the existing `UNIQUE (account_id, reference_id)` constraint on transactions. Because both ledger entries use the transfer's `reference_id`, a transfer's reference must be unused on **both** the source and the destination account, exactly like a credit or debit reference on those accounts. A resubmitted transfer therefore fails on the database constraint (`409`) and is never processed twice, even when the duplicates arrive simultaneously. The same reference may be used for transfers between unrelated accounts.
+
+### Atomicity
+
+Everything happens in one database transaction, following the same pattern as credits and debits:
+
+1. Check that both accounts exist (`404`).
+2. `INSERT` the transfer and both ledger entries. A reused reference fails here, before any balance changes.
+3. Debit the source with a conditional `UPDATE ... WHERE balance >= :amount`. No matching row means insufficient funds.
+4. Credit the destination with a conditional `UPDATE ... WHERE balance <= :maximum - :amount`.
+5. `COMMIT`.
+
+If any step fails, including a database error after the source has already been debited, the whole transaction is rolled back. Both balances return to their previous values and none of the three rows remain. It is never possible to observe only one side of a transfer.
+
+The concurrency behavior is the same as for credits and debits: SQLite allows one writer at a time, and each balance check happens inside its `UPDATE`, so simultaneous transfers cannot overdraw the source account.
+
 ## Database
 
 ### Location and configuration
@@ -373,7 +461,7 @@ The database cannot reliably enforce these alone:
 
 - **Ledger immutability.** The API has no update or delete endpoint for transactions, but the database does not stop a direct `UPDATE`. Immutability depends on the application never modifying entries.
 - **Balance consistency.** The database does not check that `balance` equals credits minus debits. The transaction endpoint keeps them consistent by inserting the entry and updating the balance in one database transaction (see [How consistency is guaranteed](#how-consistency-is-guaranteed)).
-- **Transfer completeness.** The schema allows linking entries to a transfer, but does not require that each transfer has exactly one debit on the source and one credit on the destination for the same amount. Transfer execution must create all three rows atomically.
+- **Transfer completeness.** The schema allows linking entries to a transfer, but does not require that each transfer has exactly one debit on the source and one credit on the destination for the same amount. The transfer endpoint guarantees this by creating all three rows in one database transaction (see [Atomicity](#atomicity)).
 - **Input validation.** SQLite does not enforce `VARCHAR` lengths, and the blank-string checks only consider spaces, tabs, and newlines. For account names, the API's Pydantic schema trims all surrounding whitespace (including Unicode whitespace) and enforces the 100-character limit. Transaction descriptions and reference IDs will get the same API validation when their endpoints are added.
 
 ## Monetary Representation

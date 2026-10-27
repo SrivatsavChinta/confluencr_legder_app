@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
 from app.models import TransactionType
 from app.models.base import MAX_MONEY_AMOUNT
@@ -24,21 +24,28 @@ Description = Annotated[
 ]
 
 
+def require_decimal_string(value: object) -> object:
+    # JSON numbers are parsed as binary floats before reaching Decimal, which can change the value.
+    if not isinstance(value, str):
+        raise ValueError('amount must be a decimal string, for example "500.00"')
+    return value
+
+
+# A positive rupee amount with at most two decimal places that the database can store.
+PositiveAmount = Annotated[
+    Decimal,
+    BeforeValidator(require_decimal_string),
+    Field(gt=0, le=MAX_MONEY_AMOUNT, decimal_places=2),
+]
+
+
 class TransactionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: TransactionType
-    amount: Annotated[Decimal, Field(gt=0, le=MAX_MONEY_AMOUNT, decimal_places=2)]
+    amount: PositiveAmount
     description: Description | None = None
     reference_id: ReferenceId
-
-    @field_validator("amount", mode="before")
-    @classmethod
-    def require_string_amount(cls, value: object) -> object:
-        # JSON numbers are parsed as binary floats before reaching Decimal, which can change the value.
-        if not isinstance(value, str):
-            raise ValueError('amount must be a decimal string, for example "500.00"')
-        return value
 
 
 class TransactionRecord(BaseModel):
