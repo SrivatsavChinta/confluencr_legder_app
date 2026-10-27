@@ -1,398 +1,78 @@
 # Transaction Ledger API
 
+A backend API for a simple transaction ledger, built for the "Full Stack Developer Assessment — Transaction Ledger API" take-home assignment.
+
 ## Project Overview
 
-The Transaction Ledger API is a backend service for recording financial accounts and the money that moves between them. It is being built incrementally in phases.
+The API records accounts and every movement of money against them as an immutable ledger entry. It supports:
 
-**Implemented so far:**
-
-- Phase 1: FastAPI application with a health-check endpoint.
-- Phase 2: SQLite database connectivity and the database schema (accounts, ledger transactions, and transfers) with integrity constraints.
-- Phase 3: Account management API: create, list, and retrieve accounts, and read an account's balance.
-- Phase 4: Credit and debit transactions that update the account balance atomically.
-- Phase 5: Transaction history with type filtering, pagination, and newest-first ordering.
-- Phase 6: Atomic money transfers between accounts, recorded as a linked debit and credit.
-
-All planned API functionality is implemented.
+- **Account creation and retrieval.** Accounts start with a balance of `0.00`; the server generates the ID and creation timestamp.
+- **Credit and debit transactions.** Each transaction updates the account balance atomically. Debits that exceed the balance are rejected, and a `reference_id` can be used only once per account.
+- **Balance retrieval** for any account.
+- **Transaction history** with filtering by type (`credit` / `debit`), page-based pagination, and newest-first ordering.
+- **Atomic money transfers** between two accounts (the assessment's bonus requirement), recorded as a linked debit and credit.
 
 ## Technology Stack
 
-- Python
-- FastAPI (web framework, with Pydantic for validation)
-- Uvicorn (ASGI server)
-- SQLAlchemy 2.x (ORM)
-- SQLite (database, via Python's built-in `sqlite3` driver)
-- pytest and FastAPI `TestClient` (testing; `httpx2` is the HTTP client `TestClient` uses under the hood)
+| Component | Technology | Constraint in `pyproject.toml` | Version used for verification |
+| --------- | ---------- | ------------------------------ | ----------------------------- |
+| Language | Python | `>=3.11` | 3.13.2 |
+| Web framework | FastAPI (Pydantic v2 for validation) | `fastapi>=0.162` | FastAPI 0.162.0, Pydantic 2.14.1 |
+| ASGI server | Uvicorn | `uvicorn>=0.54` | 0.54.0 |
+| ORM | SQLAlchemy 2.x | `sqlalchemy>=2.0` | 2.1.6 |
+| Database | SQLite (Python's built-in `sqlite3` driver) | — | bundled with Python |
+| Testing | pytest, FastAPI `TestClient` (uses `httpx2`) | `pytest>=9.0`, `httpx2>=2.16` | pytest 9.1.1, httpx2 2.16.0 |
 
 ## Prerequisites
 
-- Python 3.10 or newer (`python3 --version`)
+- Python 3.11 or newer (`python3 --version`). The installed versions of SQLAlchemy, Starlette, and `httpx2` declare Python 3.11 as their minimum. The project was verified with Python 3.13.
+- `pip` (included with Python). No database server is needed; SQLite is part of Python.
 
-## Local Setup
+## Installation
 
-From the project root, create and activate a virtual environment (macOS):
+From the project root, create and activate a virtual environment, then install the project with its development dependencies.
+
+macOS / Linux:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-## Dependency Installation
-
-With the virtual environment active, install the project along with its development dependencies:
-
-```bash
 pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-To install only the runtime dependencies, use `pip install -e .`.
+Windows (PowerShell; standard equivalents, not tested on Windows):
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -e ".[dev]"
+```
+
+To install only the runtime dependencies, use `pip install -e .` instead.
 
 ## Running the Application
+
+With the virtual environment active:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-The server starts at <http://127.0.0.1:8000>.
-
-## Testing
+The API is then available at `http://127.0.0.1:8000`. Check that it is running:
 
 ```bash
-pytest
+curl http://127.0.0.1:8000/health
 ```
-
-Database tests create a fresh SQLite file in a pytest temporary directory for each test. They never read or modify `data/ledger.db`.
-
-API tests (`tests/test_accounts.py`, `tests/test_transactions.py`, `tests/test_transaction_history.py`, `tests/test_transfers.py`, sharing fixtures in `tests/conftest.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
-
-## API Documentation
-
-With the server running:
-
-| Resource      | URL                            |
-| ------------- | ------------------------------ |
-| Health check  | <http://127.0.0.1:8000/health> |
-| Swagger UI    | <http://127.0.0.1:8000/docs>   |
-| ReDoc         | <http://127.0.0.1:8000/redoc>  |
-
-Expected health check response:
 
 ```json
 {"status": "ok"}
 ```
 
-## Account API
+**Database initialization.** No separate setup step is required. On startup the application creates the SQLite file `data/ledger.db` (and the `data/` directory) if it does not exist, and creates any missing tables. Existing tables and data are never dropped or reset.
 
-All account endpoints are under `/api/accounts`.
-
-### Response conventions
-
-- **Money** is returned in rupees as a string with exactly two decimal places, for example `"0.00"` or `"1234.50"`. Strings avoid JSON floating-point rounding.
-- **Timestamps** are ISO 8601 in UTC with a `Z` suffix, for example `"2026-10-27T12:00:00.123456Z"`.
-- **IDs** are positive integers generated by the database.
-- **Errors** always have a `detail` field. For `404` and `500` it is a message string. For `422` it is FastAPI's standard list of validation errors, each with `type`, `loc`, and `msg`.
-- **Unexpected database failures** return `500` with `{"detail": "Internal server error"}`. The full error is logged on the server, never sent to the client.
-
-### `POST /api/accounts`: create an account
-
-Request:
-
-```json
-{"name": "Savings Account"}
-```
-
-Response `201 Created`:
-
-```json
-{
-  "id": 1,
-  "name": "Savings Account",
-  "balance": "0.00",
-  "created_at": "2026-10-27T12:00:00.123456Z"
-}
-```
-
-Validation rules:
-
-- `name` is required and must be a JSON string.
-- Leading and trailing whitespace is trimmed before validation and storage.
-- After trimming, the name must be 1–100 characters. Longer names are rejected, not truncated.
-- No other fields are accepted. Sending `balance`, `id`, `created_at`, or anything else returns `422`, so a client never believes a supplied balance was applied. Every new account starts at `0.00`.
-- Account names do not have to be unique.
-
-Errors: `422` for an invalid or malformed body; `500` for unexpected server failures.
-
-### `GET /api/accounts`: list accounts
-
-Returns every account, newest first (by `created_at`, then by `id` for accounts created at the same instant). There is no pagination yet.
-
-Response `200 OK`:
-
-```json
-{
-  "items": [
-    {"id": 2, "name": "Current Account", "balance": "0.00", "created_at": "2026-10-27T12:05:00.000000Z"},
-    {"id": 1, "name": "Savings Account", "balance": "0.00", "created_at": "2026-10-27T12:00:00.000000Z"}
-  ]
-}
-```
-
-With no accounts, the response is `{"items": []}`.
-
-Errors: `500` for unexpected server failures.
-
-### `GET /api/accounts/{account_id}`: get account details
-
-Example: `GET /api/accounts/1`
-
-Response `200 OK`:
-
-```json
-{"id": 1, "name": "Savings Account", "balance": "0.00", "created_at": "2026-10-27T12:00:00.123456Z"}
-```
-
-Errors:
-
-- `404` `{"detail": "Account not found"}` if no account has this ID.
-- `422` if `account_id` is not an integer between 1 and 9223372036854775807 (SQLite's largest integer), for example `abc`, `1.5`, `0`, or `-1`.
-- `500` for unexpected server failures.
-
-### `GET /api/accounts/{account_id}/balance`: get account balance
-
-Returns the balance stored on the account. Every credit or debit updates this stored balance in the same database transaction that records the ledger entry, so it is not recalculated from history on each read.
-
-Example: `GET /api/accounts/1/balance`
-
-Response `200 OK`:
-
-```json
-{"account_id": 1, "balance": "0.00", "currency": "INR"}
-```
-
-Errors: same as `GET /api/accounts/{account_id}` (`404`, `422`, `500`).
-
-## Transaction API
-
-### `POST /api/accounts/{account_id}/transactions`: credit or debit an account
-
-Credit request:
-
-```json
-{"type": "credit", "amount": "1000.00", "description": "Salary", "reference_id": "TXN-001"}
-```
-
-Debit request:
-
-```json
-{"type": "debit", "amount": "500.00", "description": "Purchase", "reference_id": "TXN-002"}
-```
-
-Response `201 Created` (for the debit above, after the credit):
-
-```json
-{
-  "id": 2,
-  "account_id": 1,
-  "type": "debit",
-  "amount": "500.00",
-  "description": "Purchase",
-  "reference_id": "TXN-002",
-  "created_at": "2026-10-27T12:00:00.123456Z",
-  "balance_after": "500.00"
-}
-```
-
-`balance_after` is the account balance immediately after this transaction. It is part of this response only and is not stored on the transaction.
-
-Validation rules (`422` if broken):
-
-- `type` must be exactly `"credit"` or `"debit"`.
-- `amount` must be a JSON **string** such as `"500.00"`. JSON numbers are rejected because they are parsed as binary floating-point before reaching the server's `Decimal` logic, which can silently change large or precise values.
-- `amount` must be greater than zero, have at most two decimal places, be finite (no `NaN` or `Infinity`), and be at most `"92233720368547758.07"`, the largest amount the database can store in paise.
-- `reference_id` is required. It is trimmed, must not be blank, and must be at most 100 characters.
-- `description` is optional, trimmed, and at most 255 characters. A blank description is stored as `null`.
-- No other fields are accepted. The client cannot set `id`, `account_id`, `created_at`, or `balance_after`.
-
-Errors:
-
-| Status | When | Body |
-| ------ | ---- | ---- |
-| `404` | The account does not exist | `{"detail": "Account not found"}` |
-| `409` | `reference_id` was already used on this account | `{"detail": "A transaction with this reference_id already exists for this account"}` |
-| `409` | A debit is larger than the current balance | `{"detail": "Insufficient balance"}` |
-| `409` | A credit would push the balance past the storable maximum | `{"detail": "Resulting balance would exceed the maximum supported amount"}` |
-| `422` | Invalid body or invalid `account_id` | FastAPI validation error list |
-| `500` | Unexpected server failure | `{"detail": "Internal server error"}` |
-
-A rejected request never creates a transaction and never changes the balance. If a request is both a duplicate and an overdraft, the duplicate error is returned, so a client retrying an already-processed request is told so. A rejected (`409`) debit does not use up its `reference_id`.
-
-Transactions cannot be updated or deleted through the API.
-
-### How consistency is guaranteed
-
-Each request runs in one database transaction:
-
-1. Check that the account exists (`404` otherwise).
-2. `INSERT` the ledger entry. A reused `reference_id` fails here on the database's `UNIQUE (account_id, reference_id)` constraint, before the balance is touched.
-3. Change the balance with one conditional statement, for example for a debit:
-   `UPDATE accounts SET balance = balance - :amount WHERE id = :id AND balance >= :amount RETURNING balance`.
-   If no row matches, the funds are insufficient (or, for a credit, the maximum would be exceeded).
-4. `COMMIT`. Any failure at any step rolls back both the entry and the balance change.
-
-Because the balance check and the balance change are a single SQL statement, there is no gap between reading and writing the balance. SQLite allows only one writer at a time, so a second request waits for the first to commit and then evaluates its condition against the updated balance. Simultaneous debits therefore cannot overdraw an account, and simultaneous requests with the same `reference_id` produce exactly one transaction. The `CHECK (balance >= 0)` constraint remains as a final safeguard.
-
-A writer waits up to SQLite's default lock timeout (5 seconds). Under heavier contention than that, a request fails with `500` and is fully rolled back.
-
-### `GET /api/accounts/{account_id}/transactions`: transaction history
-
-Returns an account's ledger entries, newest first, one page at a time.
-
-Query parameters:
-
-| Parameter | Default | Rules |
-| --------- | ------- | ----- |
-| `type`    | none (both types) | Exactly `credit` or `debit` |
-| `page`    | `1`  | Integer from 1 to 92233720368547758 (keeps the SQL offset within SQLite's integer range) |
-| `limit`   | `10` | Integer from 1 to 100 (the page size) |
-
-Example: `GET /api/accounts/1/transactions?type=debit&page=2&limit=5`
-
-Response `200 OK`:
-
-```json
-{
-  "data": [
-    {
-      "id": 12,
-      "account_id": 1,
-      "type": "debit",
-      "amount": "500.00",
-      "description": "Purchase",
-      "reference_id": "TXN-012",
-      "created_at": "2026-10-27T10:00:00.123456Z"
-    }
-  ],
-  "pagination": {
-    "current_page": 2,
-    "page_size": 5,
-    "total_records": 6,
-    "total_pages": 2
-  }
-}
-```
-
-Each entry has the stored transaction fields only. `balance_after` appears in the credit/debit response but is not stored, so it is not part of the history.
-
-Behavior:
-
-- **Filtering:** with `type`, only that type is returned, and `total_records` counts only matching entries. Pagination applies to the filtered results.
-- **Ordering:** newest first by `created_at`, then by `id` (highest first) for entries with the same timestamp, so page boundaries are stable.
-- **Pagination:** `total_pages` is `ceil(total_records / page_size)`, and is `0` when nothing matches. A `page` beyond the last page returns `200` with `"data": []` and the correct metadata, not an error.
-- **Efficiency:** paging and counting happen in SQL (`COUNT(*)`, then `ORDER BY ... LIMIT ... OFFSET`), using the `(account_id, created_at, id)` index. Matching rows are never all loaded into memory.
-
-Errors:
-
-| Status | When |
-| ------ | ---- |
-| `404`  | The account does not exist (`{"detail": "Account not found"}`) |
-| `422`  | Invalid `account_id`, `type`, `page`, or `limit` (FastAPI validation error list) |
-| `500`  | Unexpected server failure (`{"detail": "Internal server error"}`) |
-
-This endpoint only reads data. It never changes balances or transactions.
-
-## Transfer API
-
-### `POST /api/transfers`: move money between two accounts
-
-Request:
-
-```json
-{
-  "source_account_id": 1,
-  "destination_account_id": 2,
-  "amount": "2000.00",
-  "reference_id": "TRANSFER-001",
-  "description": "Payment"
-}
-```
-
-Response `201 Created` (account 1 had ₹5,000.00, account 2 had ₹1,000.00):
-
-```json
-{
-  "id": 1,
-  "source_account_id": 1,
-  "destination_account_id": 2,
-  "amount": "2000.00",
-  "reference_id": "TRANSFER-001",
-  "description": "Payment",
-  "created_at": "2026-10-27T12:00:00.123456Z",
-  "debit_transaction": {
-    "id": 3, "account_id": 1, "type": "debit", "amount": "2000.00",
-    "description": "Payment", "reference_id": "TRANSFER-001", "created_at": "2026-10-27T12:00:00.123456Z"
-  },
-  "credit_transaction": {
-    "id": 4, "account_id": 2, "type": "credit", "amount": "2000.00",
-    "description": "Payment", "reference_id": "TRANSFER-001", "created_at": "2026-10-27T12:00:00.123456Z"
-  },
-  "source_balance_after": "3000.00"
-}
-```
-
-Afterwards, both accounts hold ₹3,000.00. Only the source's resulting balance is returned; the destination's balance belongs to the receiving account and is available from its own balance endpoint.
-
-Validation rules (`422` if broken):
-
-- `source_account_id` and `destination_account_id` must be JSON integers (not strings or booleans) of at least 1, and must be different.
-- `amount`, `reference_id`, and `description` follow exactly the same rules as for credits and debits: amount as a decimal string, positive, at most two decimal places, finite, within the storable maximum; `reference_id` required, trimmed, not blank, at most 100 characters; optional `description` trimmed, at most 255 characters.
-- No other fields are accepted.
-
-Errors:
-
-| Status | When | Body |
-| ------ | ---- | ---- |
-| `404` | Source account does not exist | `{"detail": "Source account not found"}` |
-| `404` | Destination account does not exist | `{"detail": "Destination account not found"}` |
-| `409` | `reference_id` is already used on the source or destination account | `{"detail": "reference_id has already been used on the source or destination account"}` |
-| `409` | Source balance is less than the amount | `{"detail": "Insufficient balance"}` |
-| `409` | The credit would push the destination past the storable maximum | `{"detail": "Destination balance would exceed the maximum supported amount"}` |
-| `422` | Invalid body, including source = destination | FastAPI validation error list |
-| `500` | Unexpected server failure | `{"detail": "Internal server error"}` |
-
-### Ledger records
-
-A successful transfer creates three rows, all with the same timestamp:
-
-- one `transfers` row (source, destination, amount),
-- one `debit` transaction on the source account,
-- one `credit` transaction on the destination account.
-
-Both transactions carry the transfer's `reference_id` and `description` and link to the transfer through `transfer_id`. They appear in each account's normal transaction history, and the `type` filter and pagination treat them like any other entry.
-
-### Reference uniqueness
-
-The `transfers` table has no reference column. Uniqueness is enforced by the existing `UNIQUE (account_id, reference_id)` constraint on transactions. Because both ledger entries use the transfer's `reference_id`, a transfer's reference must be unused on **both** the source and the destination account, exactly like a credit or debit reference on those accounts. A resubmitted transfer therefore fails on the database constraint (`409`) and is never processed twice, even when the duplicates arrive simultaneously. The same reference may be used for transfers between unrelated accounts.
-
-### Atomicity
-
-Everything happens in one database transaction, following the same pattern as credits and debits:
-
-1. Check that both accounts exist (`404`).
-2. `INSERT` the transfer and both ledger entries. A reused reference fails here, before any balance changes.
-3. Debit the source with a conditional `UPDATE ... WHERE balance >= :amount`. No matching row means insufficient funds.
-4. Credit the destination with a conditional `UPDATE ... WHERE balance <= :maximum - :amount`.
-5. `COMMIT`.
-
-If any step fails, including a database error after the source has already been debited, the whole transaction is rolled back. Both balances return to their previous values and none of the three rows remain. It is never possible to observe only one side of a transfer.
-
-The concurrency behavior is the same as for credits and debits: SQLite allows one writer at a time, and each balance check happens inside its `UPDATE`, so simultaneous transfers cannot overdraw the source account.
-
-## Database
-
-### Location and configuration
-
-By default the database is the file `data/ledger.db` under the project root. The `data/` directory is created automatically. To use a different database, set the `DATABASE_URL` environment variable to an SQLAlchemy URL:
+To use a different database file, set `DATABASE_URL` to an SQLAlchemy SQLite URL:
 
 ```bash
 DATABASE_URL="sqlite:////absolute/path/to/other.db" uvicorn app.main:app --reload
@@ -400,83 +80,85 @@ DATABASE_URL="sqlite:////absolute/path/to/other.db" uvicorn app.main:app --reloa
 
 Database files are excluded from Git by `.gitignore`.
 
-### Initialization
+## API Documentation
 
-`init_db()` in `app/core/database.py` creates any missing tables using SQLAlchemy's `Base.metadata.create_all()`. The application calls it once on startup. It is safe to run repeatedly: existing tables and data are never dropped or reset.
+Interactive documentation, generated by FastAPI from the code (available in a browser while the server is running locally):
 
-This approach only creates the initial schema. It does **not** migrate existing tables when models change later. If the schema changes in a later phase, either a migration tool (such as Alembic) is needed or a local development database must be deleted and recreated manually.
+| Documentation | Local URL |
+| ------------- | --------- |
+| Swagger UI | <http://127.0.0.1:8000/docs> |
+| ReDoc | <http://127.0.0.1:8000/redoc> |
+| OpenAPI schema (JSON) | <http://127.0.0.1:8000/openapi.json> |
 
-A local database created before the monetary storage-type checks were added does not have them. To pick them up, delete `data/ledger.db` (losing its data) and restart the application.
+Written documentation in this repository:
 
-### Tables
+| Document | Contents |
+| -------- | -------- |
+| [API Documentation](docs/API_DOCUMENTATION.md) | Every endpoint with parameters, request and response examples, status codes, error reference, and an end-to-end walkthrough |
+| [Assumptions and Design Decisions](docs/ASSUMPTIONS.md) | Assumptions, design decisions, consistency and concurrency behavior, and known limitations |
 
-**`accounts`**
+### Endpoint summary
 
-| Column       | Description |
-| ------------ | ----------- |
-| `id`         | Integer primary key, generated by the database |
-| `name`       | Required; cannot be empty or only whitespace |
-| `balance`    | INR amount, cannot be negative; the ORM sets `0.00` when no value is given |
-| `created_at` | UTC timestamp; the ORM sets the current time when no value is given |
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/health` | Service health check |
+| `POST` | `/api/accounts` | Create an account |
+| `GET` | `/api/accounts` | List all accounts |
+| `GET` | `/api/accounts/{account_id}` | Get account details |
+| `GET` | `/api/accounts/{account_id}/balance` | Get account balance |
+| `POST` | `/api/accounts/{account_id}/transactions` | Credit or debit an account |
+| `GET` | `/api/accounts/{account_id}/transactions` | Transaction history (filter, paginate) |
+| `POST` | `/api/transfers` | Transfer money between two accounts |
 
-**`transactions`** (one ledger entry against one account)
+## Running Tests
 
-| Column         | Description |
-| -------------- | ----------- |
-| `id`           | Integer primary key |
-| `account_id`   | Required; must reference an existing account |
-| `type`         | `credit` or `debit` |
-| `amount`       | INR amount, must be greater than zero |
-| `description`  | Optional |
-| `reference_id` | Required, not blank; unique per account |
-| `transfer_id`  | Optional; links the entry to the transfer that produced it |
-| `created_at`   | UTC timestamp; the ORM sets the current time when no value is given |
+With the virtual environment active, from the project root:
 
-**`transfers`** (a logical movement of money between two accounts)
+```bash
+pytest
+```
 
-| Column                   | Description |
-| ------------------------ | ----------- |
-| `id`                     | Integer primary key |
-| `source_account_id`      | Required; must reference an existing account |
-| `destination_account_id` | Required; must reference an existing account, different from the source |
-| `amount`                 | INR amount, must be greater than zero |
-| `created_at`             | UTC timestamp; the ORM sets the current time when no value is given |
+Last verified result: **243 passed**.
 
-These defaults are applied by SQLAlchemy in Python, not by the database schema. The tables define no column defaults, so a raw SQL `INSERT` must supply `balance` and `created_at` explicitly or it fails the `NOT NULL` constraint.
+Each test uses a fresh SQLite file in a pytest temporary directory. Tests never read or modify `data/ledger.db`.
 
-A transfer is designed to be recorded as one `debit` entry on the source account and one `credit` entry on the destination account, both pointing to the transfer through `transfer_id`. The foreign keys only point from `transactions` to `transfers`, which avoids circular references between the tables.
+## Project Structure
 
-### Constraints enforced by the database
+```text
+app/
+  main.py             FastAPI app, router registration, database error handler, /health
+  core/database.py    Engine, session dependency, table creation (init_db)
+  models/             SQLAlchemy models: Account, Transaction, Transfer, Money and UTC column types
+  schemas/            Pydantic request and response models
+  routers/            accounts.py, transactions.py, transfers.py
+tests/                pytest suite (API, database constraints, OpenAPI)
+docs/                 API documentation and assumptions
+```
 
-- Foreign keys are enforced (SQLite requires `PRAGMA foreign_keys = ON` for each connection, which the engine sets automatically).
-- All foreign keys use `ON DELETE RESTRICT`. An account cannot be deleted while transactions or transfers reference it, and a transfer cannot be deleted while ledger entries reference it. Financial history is never deleted silently.
-- `CHECK` constraints: non-blank account names and reference IDs, non-negative balances, positive amounts, `type IN ('credit', 'debit')`, and source ≠ destination for transfers.
-- Monetary columns (`accounts.balance`, `transactions.amount`, `transfers.amount`) must be stored as SQLite integers (`CHECK (typeof(column) = 'integer')`). SQLite does not enforce declared column types, and it treats text as greater than any number, so without this check a value such as `'abc'` would pass `amount > 0`.
-- `UNIQUE (account_id, reference_id)` on transactions. The same reference ID may be reused on a different account.
-- Index on `(account_id, created_at, id)` for listing an account's transactions newest-first, and on `transfer_id` for finding a transfer's entries.
+## Core Design Decisions
 
-### Rules that must be enforced by the application (later phases)
+Details and rationale are in [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md).
 
-The database cannot reliably enforce these alone:
+- **Exact money handling.** Amounts are Indian rupees (INR), handled as `Decimal` in Python and stored as whole paise in `INTEGER` columns. The API accepts and returns amounts as decimal strings (for example `"500.00"`). JSON numbers are rejected to avoid floating-point rounding.
+- **Atomic balance updates.** Inserting a ledger entry and changing the balance happen in one database transaction. The balance check and change are a single conditional SQL `UPDATE`, so a debit cannot overdraw an account even under concurrent requests. Any failure rolls back everything.
+- **Atomic transfers.** A transfer writes a transfer record, a debit entry, a credit entry, and both balance changes in one database transaction. A partial transfer cannot be committed.
+- **Database-level constraints.** Non-negative balances, positive amounts, valid transaction types, non-blank names and references, foreign keys, and `UNIQUE (account_id, reference_id)` are enforced by SQLite itself, as a safeguard behind the API validation.
+- **Ledger immutability through the API.** There are no endpoints to update or delete transactions (or accounts and transfers). The database does not independently block direct SQL updates.
+- **Clear error semantics.** `422` for invalid input, `404` for missing accounts, `409` for business-rule conflicts (duplicate reference, insufficient balance), and a generic `500` that never exposes database details.
 
-- **Ledger immutability.** The API has no update or delete endpoint for transactions, but the database does not stop a direct `UPDATE`. Immutability depends on the application never modifying entries.
-- **Balance consistency.** The database does not check that `balance` equals credits minus debits. The transaction endpoint keeps them consistent by inserting the entry and updating the balance in one database transaction (see [How consistency is guaranteed](#how-consistency-is-guaranteed)).
-- **Transfer completeness.** The schema allows linking entries to a transfer, but does not require that each transfer has exactly one debit on the source and one credit on the destination for the same amount. The transfer endpoint guarantees this by creating all three rows in one database transaction (see [Atomicity](#atomicity)).
-- **Input validation.** SQLite does not enforce `VARCHAR` lengths, and the blank-string checks only consider spaces, tabs, and newlines. For account names, the API's Pydantic schema trims all surrounding whitespace (including Unicode whitespace) and enforces the 100-character limit. Transaction descriptions and reference IDs will get the same API validation when their endpoints are added.
+## Assessment Coverage
 
-## Monetary Representation
+| Assessment section | Implementation |
+| ------------------ | -------------- |
+| 1. Create Account | `POST /api/accounts`: unique generated `id`, required `name`, balance always starts at `0.00`, server-generated `created_at`, client-supplied `balance` rejected (`422`) |
+| 2. Add Transaction | `POST /api/accounts/{account_id}/transactions`: credit increases and debit decreases the balance; insufficient balance returns `409`; duplicate `reference_id` on the same account returns `409` with no new transaction and no balance change; the same `reference_id` is allowed on different accounts |
+| 3. Get Account Balance | `GET /api/accounts/{account_id}/balance`: returns `account_id` and `balance`; `404` for unknown accounts |
+| 4. Get Transaction History | `GET /api/accounts/{account_id}/transactions`: `type` filter (both types when omitted), `page` and `limit` with current page, page size, total records, and total pages; newest first by `created_at` |
+| 5. Data Integrity | No update or delete endpoints for transactions; balance changes and ledger inserts are atomic; failed requests change nothing |
+| 7. Validations | Pydantic request validation (`422`) plus database constraints |
+| 8. Error Handling | Consistent `{"detail": ...}` error bodies with `404`, `409`, `422`, and `500` status codes |
+| 9. Bonus: Money Transfer | `POST /api/transfers`: both accounts must exist, sufficient source balance, debit and credit committed atomically with full rollback on failure |
+| 10. Technical Requirements | FastAPI + SQLite, layered `models` / `schemas` / `routers` structure, database constraints, local run instructions above |
+| 11. Submission | Source code (`app/`, `tests/`), this README, [API documentation](docs/API_DOCUMENTATION.md) plus Swagger UI and ReDoc, [assumptions](docs/ASSUMPTIONS.md) |
 
-All amounts are Indian rupees (INR). In Python, every amount is a `decimal.Decimal` in rupees, for example `Decimal("250.50")`. Floats are never used for money.
-
-SQLite has no exact decimal column type. A `NUMERIC` column there is stored as a floating-point value, which can introduce rounding errors. So the database stores each amount as a whole number of **paise** in an `INTEGER` column (₹250.50 is stored as `25050`). The custom SQLAlchemy column type `Money` (in `app/models/base.py`) converts automatically in both directions. Application code and the API only ever see rupees.
-
-`Money` rejects:
-
-- floats (to prevent accidental binary floating-point values),
-- amounts with more than two decimal places (for example `10.001`), instead of rounding them silently,
-- non-finite values such as `NaN` or `Infinity`,
-- values larger in magnitude than `92233720368547758.07`, which would not fit in a SQLite integer as paise.
-
-## Timestamps
-
-All timestamps are UTC. SQLite has no timezone-aware datetime type, so the custom column type `UTCDateTime` stores values as UTC and returns timezone-aware UTC `datetime` objects when they are read.
+The assessment document numbers its sections 1–5 and 7–11; it has no section 6.

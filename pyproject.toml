@@ -7,7 +7,7 @@ name = "transaction-ledger"
 version = "0.1.0"
 description = "Transaction Ledger API built with FastAPI."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.162",
     "uvicorn>=0.54",

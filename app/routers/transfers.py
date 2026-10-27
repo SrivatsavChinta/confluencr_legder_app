@@ -5,6 +5,7 @@ from app.models import Account, Transaction, TransactionType, Transfer
 from app.models.base import utc_now
 from app.routers.accounts import DbSession
 from app.routers.transactions import INSUFFICIENT_BALANCE, balance_update, reference_exists
+from app.schemas.error import ErrorResponse
 from app.schemas.transaction import TransactionRecord
 from app.schemas.transfer import TransferCreate, TransferResponse
 
@@ -14,7 +15,22 @@ DESTINATION_LIMIT_EXCEEDED = "Destination balance would exceed the maximum suppo
 DUPLICATE_REFERENCE = "reference_id has already been used on the source or destination account"
 
 
-@router.post("", response_model=TransferResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=TransferResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "Source or destination account not found",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "reference_id already used on the source or destination account, "
+            "insufficient source balance, or the destination balance would exceed the maximum",
+        },
+    },
+)
 def create_transfer(payload: TransferCreate, db: DbSession) -> TransferResponse:
     if db.get(Account, payload.source_account_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source account not found")
