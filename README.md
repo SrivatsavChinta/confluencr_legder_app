@@ -9,8 +9,9 @@ The Transaction Ledger API is a backend service for recording financial accounts
 - Phase 1: FastAPI application with a health-check endpoint.
 - Phase 2: SQLite database connectivity and the database schema (accounts, ledger transactions, and transfers) with integrity constraints.
 - Phase 3: Account management API: create, list, and retrieve accounts, and read an account's balance.
+- Phase 4: Credit and debit transactions that update the account balance atomically.
 
-**Planned for later phases (not yet available):** credit/debit processing, balance updates, transaction history with filtering and pagination, transfer execution, and idempotency handling. The `transactions` and `transfers` tables exist, but no API writes to them yet, so every account balance stays at `0.00`.
+**Planned for later phases (not yet available):** transaction history with filtering and pagination, and transfer execution. The `transfers` table exists, but no API writes to it yet.
 
 ## Technology Stack
 
@@ -61,7 +62,7 @@ pytest
 
 Database tests create a fresh SQLite file in a pytest temporary directory for each test. They never read or modify `data/ledger.db`.
 
-API tests (`tests/test_accounts.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
+API tests (`tests/test_accounts.py`, `tests/test_transactions.py`, sharing fixtures in `tests/conftest.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
 
 ## API Documentation
 
@@ -157,7 +158,7 @@ Errors:
 
 ### `GET /api/accounts/{account_id}/balance`: get account balance
 
-Returns the balance stored on the account. Balances are not recalculated from transaction history, because transaction processing is not implemented yet.
+Returns the balance stored on the account. Every credit or debit updates this stored balance in the same database transaction that records the ledger entry, so it is not recalculated from history on each read.
 
 Example: `GET /api/accounts/1/balance`
 
@@ -168,6 +169,78 @@ Response `200 OK`:
 ```
 
 Errors: same as `GET /api/accounts/{account_id}` (`404`, `422`, `500`).
+
+## Transaction API
+
+### `POST /api/accounts/{account_id}/transactions`: credit or debit an account
+
+Credit request:
+
+```json
+{"type": "credit", "amount": "1000.00", "description": "Salary", "reference_id": "TXN-001"}
+```
+
+Debit request:
+
+```json
+{"type": "debit", "amount": "500.00", "description": "Purchase", "reference_id": "TXN-002"}
+```
+
+Response `201 Created` (for the debit above, after the credit):
+
+```json
+{
+  "id": 2,
+  "account_id": 1,
+  "type": "debit",
+  "amount": "500.00",
+  "description": "Purchase",
+  "reference_id": "TXN-002",
+  "created_at": "2026-10-27T12:00:00.123456Z",
+  "balance_after": "500.00"
+}
+```
+
+`balance_after` is the account balance immediately after this transaction. It is part of this response only and is not stored on the transaction.
+
+Validation rules (`422` if broken):
+
+- `type` must be exactly `"credit"` or `"debit"`.
+- `amount` must be a JSON **string** such as `"500.00"`. JSON numbers are rejected because they are parsed as binary floating-point before reaching the server's `Decimal` logic, which can silently change large or precise values.
+- `amount` must be greater than zero, have at most two decimal places, be finite (no `NaN` or `Infinity`), and be at most `"92233720368547758.07"`, the largest amount the database can store in paise.
+- `reference_id` is required. It is trimmed, must not be blank, and must be at most 100 characters.
+- `description` is optional, trimmed, and at most 255 characters. A blank description is stored as `null`.
+- No other fields are accepted. The client cannot set `id`, `account_id`, `created_at`, or `balance_after`.
+
+Errors:
+
+| Status | When | Body |
+| ------ | ---- | ---- |
+| `404` | The account does not exist | `{"detail": "Account not found"}` |
+| `409` | `reference_id` was already used on this account | `{"detail": "A transaction with this reference_id already exists for this account"}` |
+| `409` | A debit is larger than the current balance | `{"detail": "Insufficient balance"}` |
+| `409` | A credit would push the balance past the storable maximum | `{"detail": "Resulting balance would exceed the maximum supported amount"}` |
+| `422` | Invalid body or invalid `account_id` | FastAPI validation error list |
+| `500` | Unexpected server failure | `{"detail": "Internal server error"}` |
+
+A rejected request never creates a transaction and never changes the balance. If a request is both a duplicate and an overdraft, the duplicate error is returned, so a client retrying an already-processed request is told so. A rejected (`409`) debit does not use up its `reference_id`.
+
+Transactions cannot be updated or deleted through the API.
+
+### How consistency is guaranteed
+
+Each request runs in one database transaction:
+
+1. Check that the account exists (`404` otherwise).
+2. `INSERT` the ledger entry. A reused `reference_id` fails here on the database's `UNIQUE (account_id, reference_id)` constraint, before the balance is touched.
+3. Change the balance with one conditional statement, for example for a debit:
+   `UPDATE accounts SET balance = balance - :amount WHERE id = :id AND balance >= :amount RETURNING balance`.
+   If no row matches, the funds are insufficient (or, for a credit, the maximum would be exceeded).
+4. `COMMIT`. Any failure at any step rolls back both the entry and the balance change.
+
+Because the balance check and the balance change are a single SQL statement, there is no gap between reading and writing the balance. SQLite allows only one writer at a time, so a second request waits for the first to commit and then evaluates its condition against the updated balance. Simultaneous debits therefore cannot overdraw an account, and simultaneous requests with the same `reference_id` produce exactly one transaction. The `CHECK (balance >= 0)` constraint remains as a final safeguard.
+
+A writer waits up to SQLite's default lock timeout (5 seconds). Under heavier contention than that, a request fails with `500` and is fully rolled back.
 
 ## Database
 
@@ -240,8 +313,8 @@ A transfer is designed to be recorded as one `debit` entry on the source account
 
 The database cannot reliably enforce these alone:
 
-- **Ledger immutability.** No update or delete API will exist for transactions, but the database does not stop a direct `UPDATE`. Immutability depends on the application never modifying entries.
-- **Balance consistency.** The database does not check that `balance` equals credits minus debits. Updating the balance and inserting the ledger entry must happen together in one database transaction.
+- **Ledger immutability.** The API has no update or delete endpoint for transactions, but the database does not stop a direct `UPDATE`. Immutability depends on the application never modifying entries.
+- **Balance consistency.** The database does not check that `balance` equals credits minus debits. The transaction endpoint keeps them consistent by inserting the entry and updating the balance in one database transaction (see [How consistency is guaranteed](#how-consistency-is-guaranteed)).
 - **Transfer completeness.** The schema allows linking entries to a transfer, but does not require that each transfer has exactly one debit on the source and one credit on the destination for the same amount. Transfer execution must create all three rows atomically.
 - **Input validation.** SQLite does not enforce `VARCHAR` lengths, and the blank-string checks only consider spaces, tabs, and newlines. For account names, the API's Pydantic schema trims all surrounding whitespace (including Unicode whitespace) and enforces the 100-character limit. Transaction descriptions and reference IDs will get the same API validation when their endpoints are added.
 
@@ -255,7 +328,8 @@ SQLite has no exact decimal column type. A `NUMERIC` column there is stored as a
 
 - floats (to prevent accidental binary floating-point values),
 - amounts with more than two decimal places (for example `10.001`), instead of rounding them silently,
-- non-finite values such as `NaN` or `Infinity`.
+- non-finite values such as `NaN` or `Infinity`,
+- values larger in magnitude than `92233720368547758.07`, which would not fit in a SQLite integer as paise.
 
 ## Timestamps
 

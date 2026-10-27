@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import engine, init_db
-from app.routers import accounts
+from app.routers import accounts, transactions
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ app = FastAPI(
 )
 
 app.include_router(accounts.router)
+app.include_router(transactions.router)
 
 
 @app.exception_handler(SQLAlchemyError)
