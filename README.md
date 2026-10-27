@@ -10,8 +10,9 @@ The Transaction Ledger API is a backend service for recording financial accounts
 - Phase 2: SQLite database connectivity and the database schema (accounts, ledger transactions, and transfers) with integrity constraints.
 - Phase 3: Account management API: create, list, and retrieve accounts, and read an account's balance.
 - Phase 4: Credit and debit transactions that update the account balance atomically.
+- Phase 5: Transaction history with type filtering, pagination, and newest-first ordering.
 
-**Planned for later phases (not yet available):** transaction history with filtering and pagination, and transfer execution. The `transfers` table exists, but no API writes to it yet.
+**Planned for later phases (not yet available):** transfer execution. The `transfers` table exists, but no API writes to it yet.
 
 ## Technology Stack
 
@@ -62,7 +63,7 @@ pytest
 
 Database tests create a fresh SQLite file in a pytest temporary directory for each test. They never read or modify `data/ledger.db`.
 
-API tests (`tests/test_accounts.py`, `tests/test_transactions.py`, sharing fixtures in `tests/conftest.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
+API tests (`tests/test_accounts.py`, `tests/test_transactions.py`, `tests/test_transaction_history.py`, sharing fixtures in `tests/conftest.py`) do the same. They replace the `get_db` session dependency with one bound to the temporary database, and remove the override after each test. The test client is deliberately not used as a context manager, because that would run the application's startup step against the default database.
 
 ## API Documentation
 
@@ -241,6 +242,63 @@ Each request runs in one database transaction:
 Because the balance check and the balance change are a single SQL statement, there is no gap between reading and writing the balance. SQLite allows only one writer at a time, so a second request waits for the first to commit and then evaluates its condition against the updated balance. Simultaneous debits therefore cannot overdraw an account, and simultaneous requests with the same `reference_id` produce exactly one transaction. The `CHECK (balance >= 0)` constraint remains as a final safeguard.
 
 A writer waits up to SQLite's default lock timeout (5 seconds). Under heavier contention than that, a request fails with `500` and is fully rolled back.
+
+### `GET /api/accounts/{account_id}/transactions`: transaction history
+
+Returns an account's ledger entries, newest first, one page at a time.
+
+Query parameters:
+
+| Parameter | Default | Rules |
+| --------- | ------- | ----- |
+| `type`    | none (both types) | Exactly `credit` or `debit` |
+| `page`    | `1`  | Integer from 1 to 92233720368547758 (keeps the SQL offset within SQLite's integer range) |
+| `limit`   | `10` | Integer from 1 to 100 (the page size) |
+
+Example: `GET /api/accounts/1/transactions?type=debit&page=2&limit=5`
+
+Response `200 OK`:
+
+```json
+{
+  "data": [
+    {
+      "id": 12,
+      "account_id": 1,
+      "type": "debit",
+      "amount": "500.00",
+      "description": "Purchase",
+      "reference_id": "TXN-012",
+      "created_at": "2026-10-27T10:00:00.123456Z"
+    }
+  ],
+  "pagination": {
+    "current_page": 2,
+    "page_size": 5,
+    "total_records": 6,
+    "total_pages": 2
+  }
+}
+```
+
+Each entry has the stored transaction fields only. `balance_after` appears in the credit/debit response but is not stored, so it is not part of the history.
+
+Behavior:
+
+- **Filtering:** with `type`, only that type is returned, and `total_records` counts only matching entries. Pagination applies to the filtered results.
+- **Ordering:** newest first by `created_at`, then by `id` (highest first) for entries with the same timestamp, so page boundaries are stable.
+- **Pagination:** `total_pages` is `ceil(total_records / page_size)`, and is `0` when nothing matches. A `page` beyond the last page returns `200` with `"data": []` and the correct metadata, not an error.
+- **Efficiency:** paging and counting happen in SQL (`COUNT(*)`, then `ORDER BY ... LIMIT ... OFFSET`), using the `(account_id, created_at, id)` index. Matching rows are never all loaded into memory.
+
+Errors:
+
+| Status | When |
+| ------ | ---- |
+| `404`  | The account does not exist (`{"detail": "Account not found"}`) |
+| `422`  | Invalid `account_id`, `type`, `page`, or `limit` (FastAPI validation error list) |
+| `500`  | Unexpected server failure (`{"detail": "Internal server error"}`) |
+
+This endpoint only reads data. It never changes balances or transactions.
 
 ## Database
 

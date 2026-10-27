@@ -1,16 +1,23 @@
+import math
 from decimal import Decimal
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import Update, select, update
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import Update, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Account, Transaction, TransactionType
-from app.models.base import MAX_MONEY_AMOUNT
+from app.models.base import MAX_MONEY_AMOUNT, SQLITE_MAX_INTEGER
 from app.routers.accounts import AccountId, DbSession, get_account_or_404
-from app.schemas.transaction import TransactionCreate, TransactionResponse
+from app.schemas.transaction import TransactionCreate, TransactionHistoryResponse, TransactionResponse
 
 router = APIRouter(prefix="/api/accounts", tags=["transactions"])
+
+DEFAULT_PAGE_SIZE = 10
+MAX_PAGE_SIZE = 100
+# Keeps the SQL OFFSET, (page - 1) * limit, within SQLite's integer range for any allowed limit.
+MAX_PAGE = SQLITE_MAX_INTEGER // MAX_PAGE_SIZE
 
 INSUFFICIENT_BALANCE = "Insufficient balance"
 BALANCE_LIMIT_EXCEEDED = "Resulting balance would exceed the maximum supported amount"
@@ -87,3 +94,45 @@ def create_transaction(account_id: AccountId, payload: TransactionCreate, db: Db
         created_at=entry.created_at,
         balance_after=balance_after,
     )
+
+
+@router.get("/{account_id}/transactions", response_model=TransactionHistoryResponse)
+def list_transactions(
+    account_id: AccountId,
+    db: DbSession,
+    transaction_type: Annotated[
+        TransactionType | None,
+        Query(alias="type", description="Only return credits or debits"),
+    ] = None,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 1,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+) -> dict:
+    get_account_or_404(db, account_id)
+
+    filters = [Transaction.account_id == account_id]
+    if transaction_type is not None:
+        filters.append(Transaction.type == transaction_type)
+
+    total_records = db.scalar(select(func.count()).select_from(Transaction).where(*filters))
+    offset = (page - 1) * limit
+
+    entries = []
+    if offset < total_records:
+        entries = db.scalars(
+            select(Transaction)
+            .where(*filters)
+            # Newest first; id breaks ties between entries with the same timestamp.
+            .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+
+    return {
+        "data": entries,
+        "pagination": {
+            "current_page": page,
+            "page_size": limit,
+            "total_records": total_records,
+            "total_pages": math.ceil(total_records / limit),
+        },
+    }
