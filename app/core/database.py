@@ -1,9 +1,10 @@
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import Base
 
@@ -49,3 +50,9 @@ def init_db(engine: Engine) -> None:
 
 engine = create_db_engine(DATABASE_URL)
 SessionLocal = create_session_factory(engine)
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency: one session per request, closed (and rolled back if uncommitted) afterwards."""
+    with SessionLocal() as session:
+        yield session

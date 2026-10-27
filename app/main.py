@@ -1,8 +1,14 @@
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import engine, init_db
+from app.routers import accounts
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -17,6 +23,18 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.include_router(accounts.router)
+
+
+@app.exception_handler(SQLAlchemyError)
+def handle_database_error(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    # Log the full error for operators; never send SQL or driver details to the client.
+    logger.exception("Database error while handling %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error"},
+    )
 
 
 @app.get("/health", tags=["health"])
